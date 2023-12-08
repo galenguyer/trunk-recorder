@@ -340,6 +340,8 @@ install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/lib/json.hpp" # source file
 
 add_subdirectory(plugins/openmhz_uploader)
 
+add_subdirectory(plugins/clearcut_uploader)
+
 add_subdirectory(plugins/stat_socket)
 
 add_subdirectory(plugins/broadcastify_uploader)

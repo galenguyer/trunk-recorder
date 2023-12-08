@@ -603,6 +603,7 @@ bool load_config(string config_file, Config &config, gr::top_block_sptr &tb, std
     }
 
     BOOST_LOG_TRIVIAL(info) << "\n\n-------------------------------------\nPLUGINS\n-------------------------------------\n";
+    add_internal_plugin("clearcut_uploader", "libclearcut_uploader.so", data);
     add_internal_plugin("openmhz_uploader", "libopenmhz_uploader.so", data);
     add_internal_plugin("broadcastify_uploader", "libbroadcastify_uploader.so", data);
     add_internal_plugin("unit_script", "libunit_script.so", data);
