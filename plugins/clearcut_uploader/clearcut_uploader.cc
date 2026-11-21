@@ -110,7 +110,7 @@ public:
     curl_formadd(&formpost,
                  &lastptr,
                  CURLFORM_COPYNAME, "call",
-                 CURLFORM_FILE, call_info.converted,
+                 CURLFORM_FILE, call_info.converted.c_str(),
                  CURLFORM_CONTENTTYPE, "application/octet-stream",
                  CURLFORM_END);
 
@@ -277,7 +277,7 @@ public:
 
       if (res == CURLM_OK && response_code == 200) {
         struct stat file_info;
-        stat(call_info.converted, &file_info);
+        stat(call_info.converted.c_str(), &file_info);
 
         BOOST_LOG_TRIVIAL(info) << "[" << call_info.short_name << "]\t\033[0;34m" << call_info.call_num << "C\033[0m\tTG: " << call_info.talkgroup_display << "\tFreq: " << format_freq(call_info.freq) << "\tClearcut Upload Success - file size: " << file_info.st_size;
         ;
