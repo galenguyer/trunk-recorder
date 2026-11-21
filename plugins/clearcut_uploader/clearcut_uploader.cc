@@ -8,6 +8,7 @@
 #include "../trunk-recorder/gr_blocks/decoder_wrapper.h"
 #include <boost/dll/alias.hpp> // for BOOST_DLL_ALIAS
 #include <boost/foreach.hpp>
+#include <boost/thread/mutex.hpp>
 #include <sys/stat.h>
 
 struct Clearcut_System_Key {
@@ -20,10 +21,13 @@ struct Clearcut_Uploader_Data {
   std::string Clearcut_server;
 };
 
+boost::mutex curl_share_mutex;
+
 class Clearcut_Uploader : public Plugin_Api {
-  // float aggr_;
-  // my_plugin_aggregator() : aggr_(0) {}
   Clearcut_Uploader_Data data;
+  CURLSH *curl_share;
+  long curl_dns_ttl;
+  std::string plugin_name;
 
 public:
   std::string get_api_key(std::string short_name) {
@@ -43,9 +47,10 @@ public:
 
     std::string api_key = get_api_key(call_info.short_name);
     if (api_key.size() == 0) {
-      // BOOST_LOG_TRIVIAL(error) << "[" << call_info.short_name << "]\tTG: " << talkgroup_display << "\t " << std::put_time(std::localtime(&start_time), "%c %Z") << "\tClearcut Upload failed, API Key not found in config for shortName";
       return 0;
     }
+
+    std::string loghdr = log_header(call_info.short_name, call_info.call_num, call_info.talkgroup_display, call_info.freq);
 
     std::ostringstream freq;
     std::string freq_string;
@@ -86,205 +91,195 @@ public:
       source_list << "]";
     }
 
-    char formattedTalkgroup[62];
-    snprintf(formattedTalkgroup, 61, "%c[%dm%10ld%c[0m", 0x1B, 35, call_info.talkgroup, 0x1B);
-    std::string talkgroup_display = boost::lexical_cast<std::string>(formattedTalkgroup);
-    CURL *curl;
-    CURLMcode res;
-    CURLM *multi_handle;
-    int still_running = 0;
-    std::string response_buffer;
     freq_string = freq.str();
     error_count_string = error_count.str();
     spike_count_string = spike_count.str();
-
     source_list_string = source_list.str();
     call_length_string = call_length.str();
 
-    struct curl_httppost *formpost = NULL;
-    struct curl_httppost *lastptr = NULL;
-    struct curl_slist *headerlist = NULL;
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+      BOOST_LOG_TRIVIAL(error) << loghdr << this->plugin_name << " Upload Error: unable to initialize curl";
+      return 1;
+    }
+
+    curl_mime *mime = curl_mime_init(curl);
+    if (!mime) {
+      BOOST_LOG_TRIVIAL(error) << loghdr << this->plugin_name << " Upload Error: unable to initialize mime";
+      curl_easy_cleanup(curl);
+      return 1;
+    }
+
+    curl_mimepart *part;
 
     /* Fill in the file upload field. This makes libcurl load data from
      the given file name when curl_easy_perform() is called. */
-    curl_formadd(&formpost,
-                 &lastptr,
-                 CURLFORM_COPYNAME, "call",
-                 CURLFORM_FILE, call_info.converted.c_str(),
-                 CURLFORM_CONTENTTYPE, "application/octet-stream",
-                 CURLFORM_END);
+    part = curl_mime_addpart(mime);
+    curl_mime_filedata(part, call_info.converted.c_str());
+    curl_mime_type(part, "application/octet-stream");
+    curl_mime_name(part, "call");
 
-    curl_formadd(&formpost,
-                 &lastptr,
-                 CURLFORM_COPYNAME, "freq",
-                 CURLFORM_COPYCONTENTS, freq_string.c_str(),
-                 CURLFORM_END);
+    part = curl_mime_addpart(mime);
+    curl_mime_data(part, freq_string.c_str(), CURL_ZERO_TERMINATED);
+    curl_mime_name(part, "freq");
 
-    curl_formadd(&formpost,
-                 &lastptr,
-                 CURLFORM_COPYNAME, "error_count",
-                 CURLFORM_COPYCONTENTS, error_count_string.c_str(),
-                 CURLFORM_END);
+    part = curl_mime_addpart(mime);
+    curl_mime_data(part, error_count_string.c_str(), CURL_ZERO_TERMINATED);
+    curl_mime_name(part, "error_count");
 
-    curl_formadd(&formpost,
-                 &lastptr,
-                 CURLFORM_COPYNAME, "spike_count",
-                 CURLFORM_COPYCONTENTS, spike_count_string.c_str(),
-                 CURLFORM_END);
+    part = curl_mime_addpart(mime);
+    curl_mime_data(part, spike_count_string.c_str(), CURL_ZERO_TERMINATED);
+    curl_mime_name(part, "spike_count");
 
-    curl_formadd(&formpost,
-                 &lastptr,
-                 CURLFORM_COPYNAME, "start_time",
-                 CURLFORM_COPYCONTENTS, boost::lexical_cast<std::string>(call_info.start_time).c_str(),
-                 CURLFORM_END);
+    part = curl_mime_addpart(mime);
+    curl_mime_data(part, boost::lexical_cast<std::string>(call_info.start_time).c_str(), CURL_ZERO_TERMINATED);
+    curl_mime_name(part, "start_time");
 
-    curl_formadd(&formpost,
-                 &lastptr,
-                 CURLFORM_COPYNAME, "stop_time",
-                 CURLFORM_COPYCONTENTS, boost::lexical_cast<std::string>(call_info.stop_time).c_str(),
-                 CURLFORM_END);
+    part = curl_mime_addpart(mime);
+    curl_mime_data(part, boost::lexical_cast<std::string>(call_info.stop_time).c_str(), CURL_ZERO_TERMINATED);
+    curl_mime_name(part, "stop_time");
 
-    curl_formadd(&formpost,
-                 &lastptr,
-                 CURLFORM_COPYNAME, "call_length",
-                 CURLFORM_COPYCONTENTS, call_length_string.c_str(),
-                 CURLFORM_END);
+    part = curl_mime_addpart(mime);
+    curl_mime_data(part, call_length_string.c_str(), CURL_ZERO_TERMINATED);
+    curl_mime_name(part, "call_length");
 
-    curl_formadd(&formpost,
-                 &lastptr,
-                 CURLFORM_COPYNAME, "talkgroup_num",
-                 CURLFORM_COPYCONTENTS, boost::lexical_cast<std::string>(call_info.talkgroup).c_str(),
-                 CURLFORM_END);
+    part = curl_mime_addpart(mime);
+    curl_mime_data(part, boost::lexical_cast<std::string>(call_info.talkgroup).c_str(), CURL_ZERO_TERMINATED);
+    curl_mime_name(part, "talkgroup_num");
 
-    curl_formadd(&formpost,
-                 &lastptr,
-                 CURLFORM_COPYNAME, "emergency",
-                 CURLFORM_COPYCONTENTS, boost::lexical_cast<std::string>(call_info.emergency).c_str(),
-                 CURLFORM_END);
+    part = curl_mime_addpart(mime);
+    curl_mime_data(part, boost::lexical_cast<std::string>(call_info.emergency).c_str(), CURL_ZERO_TERMINATED);
+    curl_mime_name(part, "emergency");
 
-    curl_formadd(&formpost,
-                 &lastptr,
-                 CURLFORM_COPYNAME, "api_key",
-                 CURLFORM_COPYCONTENTS, api_key.c_str(),
-                 CURLFORM_END);
+    part = curl_mime_addpart(mime);
+    curl_mime_data(part, api_key.c_str(), CURL_ZERO_TERMINATED);
+    curl_mime_name(part, "api_key");
 
-    curl_formadd(&formpost,
-                 &lastptr,
-                 CURLFORM_COPYNAME, "source_list",
-                 CURLFORM_COPYCONTENTS, source_list_string.c_str(),
-                 CURLFORM_END);
+    part = curl_mime_addpart(mime);
+    curl_mime_data(part, source_list_string.c_str(), CURL_ZERO_TERMINATED);
+    curl_mime_name(part, "source_list");
 
-    curl = curl_easy_init();
-    multi_handle = curl_multi_init();
+    CURLM *multi_handle = curl_multi_init();
+    if (!multi_handle) {
+      BOOST_LOG_TRIVIAL(error) << loghdr << this->plugin_name << " Upload Error: unable to initialize curl multi handle";
+      curl_mime_free(mime);
+      curl_easy_cleanup(curl);
+      return 1;
+    }
 
     /* initialize custom header list (stating that Expect: 100-continue is not wanted */
-    headerlist = curl_slist_append(headerlist, "Expect:");
-    if (curl && multi_handle) {
-      std::string url = data.Clearcut_server + "/api/v1/upload";
+    struct curl_slist *headerlist = curl_slist_append(NULL, "Expect:");
 
-      /* what URL that receives this POST */
-      curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    int still_running = 0;
+    std::string response_buffer;
+    CURLMcode res;
 
-      curl_easy_setopt(curl, CURLOPT_USERAGENT, "TrunkRecorder1.0");
-      curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headerlist);
-      curl_easy_setopt(curl, CURLOPT_HTTPPOST, formpost);
+    std::string url = data.Clearcut_server + "/api/v1/upload";
 
-      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_buffer);
+    /* what URL that receives this POST */
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
 
-      curl_multi_add_handle(multi_handle, curl);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "TrunkRecorder1.0");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headerlist);
+    curl_easy_setopt(curl, CURLOPT_MIMEPOST, mime);
 
-      curl_multi_perform(multi_handle, &still_running);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_buffer);
 
-      while (still_running) {
-        struct timeval timeout;
-        int rc;       /* select() return code */
-        CURLMcode mc; /* curl_multi_fdset() return code */
+    curl_easy_setopt(curl, CURLOPT_SHARE, curl_share);
+    curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, curl_dns_ttl);
 
-        fd_set fdread;
-        fd_set fdwrite;
-        fd_set fdexcep;
-        int maxfd = -1;
+    curl_multi_add_handle(multi_handle, curl);
 
-        long curl_timeo = -1;
+    curl_multi_perform(multi_handle, &still_running);
 
-        FD_ZERO(&fdread);
-        FD_ZERO(&fdwrite);
-        FD_ZERO(&fdexcep);
+    while (still_running) {
+      struct timeval timeout;
+      int rc;       /* select() return code */
+      CURLMcode mc; /* curl_multi_fdset() return code */
 
-        /* set a suitable timeout to play around with */
-        timeout.tv_sec = 1;
-        timeout.tv_usec = 0;
+      fd_set fdread;
+      fd_set fdwrite;
+      fd_set fdexcep;
+      int maxfd = -1;
 
-        curl_multi_timeout(multi_handle, &curl_timeo);
-        if (curl_timeo >= 0) {
-          timeout.tv_sec = curl_timeo / 1000;
-          if (timeout.tv_sec > 1)
-            timeout.tv_sec = 1;
-          else
-            timeout.tv_usec = (curl_timeo % 1000) * 1000;
-        }
+      long curl_timeo = -1;
 
-        /* get file descriptors from the transfers */
-        mc = curl_multi_fdset(multi_handle, &fdread, &fdwrite, &fdexcep, &maxfd);
+      FD_ZERO(&fdread);
+      FD_ZERO(&fdwrite);
+      FD_ZERO(&fdexcep);
 
-        if (mc != CURLM_OK) {
-          fprintf(stderr, "curl_multi_fdset() failed, code %d.\n", mc);
-          break;
-        }
+      /* set a suitable timeout to play around with */
+      timeout.tv_sec = 1;
+      timeout.tv_usec = 0;
 
-        /* On success the value of maxfd is guaranteed to be >= -1. We call
-         select(maxfd + 1, ...); specially in case of (maxfd == -1) there are
-         no fds ready yet so we call select(0, ...) --or Sleep() on Windows--
-         to sleep 100ms, which is the minimum suggested value in the
-         curl_multi_fdset() doc. */
-
-        if (maxfd == -1) {
-          /* Portable sleep for platforms other than Windows. */
-          struct timeval wait = {0, 100 * 1000}; /* 100ms */
-          rc = select(0, NULL, NULL, NULL, &wait);
-        } else {
-          /* Note that on some platforms 'timeout' may be modified by select().
-           If you need access to the original value save a copy beforehand. */
-          rc = select(maxfd + 1, &fdread, &fdwrite, &fdexcep, &timeout);
-        }
-
-        switch (rc) {
-        case -1:
-          /* select error */
-          break;
-        case 0:
-        default:
-          /* timeout or readable/writable sockets */
-          curl_multi_perform(multi_handle, &still_running);
-          break;
-        }
+      curl_multi_timeout(multi_handle, &curl_timeo);
+      if (curl_timeo >= 0) {
+        timeout.tv_sec = curl_timeo / 1000;
+        if (timeout.tv_sec > 1)
+          timeout.tv_sec = 1;
+        else
+          timeout.tv_usec = (curl_timeo % 1000) * 1000;
       }
 
-      long response_code;
-      curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+      /* get file descriptors from the transfers */
+      mc = curl_multi_fdset(multi_handle, &fdread, &fdwrite, &fdexcep, &maxfd);
 
-      res = curl_multi_cleanup(multi_handle);
+      if (mc != CURLM_OK) {
+        fprintf(stderr, "curl_multi_fdset() failed, code %d.\n", mc);
+        break;
+      }
 
-      /* always cleanup */
-      curl_easy_cleanup(curl);
+      /* On success the value of maxfd is guaranteed to be >= -1. We call
+       select(maxfd + 1, ...); specially in case of (maxfd == -1) there are
+       no fds ready yet so we call select(0, ...) --or Sleep() on Windows--
+       to sleep 100ms, which is the minimum suggested value in the
+       curl_multi_fdset() doc. */
 
-      /* then cleanup the formpost chain */
-      curl_formfree(formpost);
+      if (maxfd == -1) {
+        /* Portable sleep for platforms other than Windows. */
+        struct timeval wait = {0, 100 * 1000}; /* 100ms */
+        rc = select(0, NULL, NULL, NULL, &wait);
+      } else {
+        /* Note that on some platforms 'timeout' may be modified by select().
+         If you need access to the original value save a copy beforehand. */
+        rc = select(maxfd + 1, &fdread, &fdwrite, &fdexcep, &timeout);
+      }
 
-      /* free slist */
-      curl_slist_free_all(headerlist);
-
-      if (res == CURLM_OK && response_code == 200) {
-        struct stat file_info;
-        stat(call_info.converted.c_str(), &file_info);
-
-        BOOST_LOG_TRIVIAL(info) << "[" << call_info.short_name << "]\t\033[0;34m" << call_info.call_num << "C\033[0m\tTG: " << call_info.talkgroup_display << "\tFreq: " << format_freq(call_info.freq) << "\tClearcut Upload Success - file size: " << file_info.st_size;
-        ;
-        return 0;
+      switch (rc) {
+      case -1:
+        /* select error */
+        break;
+      case 0:
+      default:
+        /* timeout or readable/writable sockets */
+        curl_multi_perform(multi_handle, &still_running);
+        break;
       }
     }
-    BOOST_LOG_TRIVIAL(error) << "[" << call_info.short_name << "]\t\033[0;34m" << call_info.call_num << "C\033[0m\tTG: " << call_info.talkgroup_display << "\tFreq: " << format_freq(call_info.freq) << "\tClearcut Upload Error: " << response_buffer;
+
+    long response_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+
+    res = curl_multi_cleanup(multi_handle);
+
+    /* always cleanup */
+    curl_easy_cleanup(curl);
+
+    /* then cleanup the mime */
+    curl_mime_free(mime);
+
+    /* free slist */
+    curl_slist_free_all(headerlist);
+
+    if (res == CURLM_OK && response_code == 200) {
+      struct stat file_info = {};
+      stat(call_info.converted.c_str(), &file_info);
+      BOOST_LOG_TRIVIAL(info) << loghdr << this->plugin_name << " Upload Success - file size: " << file_info.st_size;
+      return 0;
+    }
+
+    BOOST_LOG_TRIVIAL(error) << loghdr << this->plugin_name << " Upload Error: " << response_buffer;
     return 1;
   }
 
@@ -293,22 +288,27 @@ public:
   }
 
   int parse_config(json config_data) {
+    // Extract plugin name from config, with fallback for default internal plugin name
+    std::string config_name = config_data.value("name", "clearcut_uploader");
+    this->plugin_name = (config_name == "clearcut_uploader") ? "ClearCut" : config_name;
+    std::string log_prefix = "\t[ClearCut]\t";
 
-    // Tests to see if the uploadServer value exists in the config file
+    // Tests to see if the clearcutServer value exists in the config file
     bool upload_server_exists = config_data.contains("clearcutServer");
     if (!upload_server_exists) {
       return 1;
     }
 
     this->data.Clearcut_server = config_data.value("clearcutServer", "");
-    BOOST_LOG_TRIVIAL(info) << "Clearcut Server: " << this->data.Clearcut_server;
+    BOOST_LOG_TRIVIAL(info) << log_prefix << "ClearCut Server: " << this->data.Clearcut_server;
 
     // from: http://www.zedwood.com/article/cpp-boost-url-regex
+    boost::regex api_regex("(.*)(.{2}$)");
     boost::regex ex("(http|https)://([^/ :]+):?([^/ ]*)(/?[^ #?]*)\\x3f?([^ #]*)#?([^ ]*)");
     boost::cmatch what;
 
     if (!regex_match(this->data.Clearcut_server.c_str(), what, ex)) {
-      BOOST_LOG_TRIVIAL(error) << "Unable to parse Server URL\n";
+      BOOST_LOG_TRIVIAL(error) << log_prefix << "Unable to parse Server URL\n";
       return 1;
     }
     // Gets the API key for each system, if defined
@@ -318,17 +318,35 @@ public:
         Clearcut_System_Key key;
         key.api_key = element.value("clearcutApiKey", "");
         key.short_name = element.value("shortName", "");
-        BOOST_LOG_TRIVIAL(info) << "Uploading calls for: " << key.short_name;
+        regex_match(key.api_key.c_str(), what, api_regex);
+        std::string redacted_api(what[2].first, what[2].second);
+        BOOST_LOG_TRIVIAL(info) << log_prefix << "Uploading calls for: " << key.short_name << "\t API Key: ******" << redacted_api;
         this->data.keys.push_back(key);
       }
     }
 
     if (this->data.keys.size() == 0) {
-      BOOST_LOG_TRIVIAL(error) << "Clearcut Server set, but no Systems are configured\n";
+      BOOST_LOG_TRIVIAL(error) << log_prefix << "Clearcut Server set, but no Systems are configured\n";
       return 1;
     }
 
+    // Initialize shared curl cache to reduce DNS lookups (5 min TTL)
+    curl_share = curl_share_init();
+    curl_share_setopt(curl_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
+    curl_share_setopt(curl_share, CURLSHOPT_LOCKFUNC, curl_lock_cb);
+    curl_share_setopt(curl_share, CURLSHOPT_UNLOCKFUNC, curl_unlock_cb);
+    curl_dns_ttl = 300;
+
     return 0;
+  }
+
+  // curl callbacks
+  static void curl_lock_cb(CURL *handle, curl_lock_data data, curl_lock_access access, void *userptr) {
+    curl_share_mutex.lock();
+  }
+
+  static void curl_unlock_cb(CURL *handle, curl_lock_data data, curl_lock_access access, void *userptr) {
+    curl_share_mutex.unlock();
   }
 
   /*
