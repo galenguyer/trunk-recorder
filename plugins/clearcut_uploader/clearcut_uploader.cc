@@ -72,29 +72,24 @@ public:
     call_length << std::fixed << std::setprecision(0);
     call_length << call_info.length;
 
-    std::ostringstream source_list;
-    std::string source_list_string;
-    source_list << std::fixed << std::setprecision(2);
-    source_list << "[";
-
-    if (call_info.transmission_source_list.size() != 0) {
-      for (unsigned long i = 0; i < call_info.transmission_source_list.size(); i++) {
-        source_list << "{ \"pos\": " << std::setprecision(2) << call_info.transmission_source_list[i].position << ", \"src\": " << std::setprecision(0) << call_info.transmission_source_list[i].source << " }";
-
-        if (i < (call_info.transmission_source_list.size() - 1)) {
-          source_list << ", ";
-        } else {
-          source_list << "]";
-        }
+    json source_list = json::array();
+    for (const auto &source : call_info.transmission_source_list) {
+      json entry = {
+          {"pos", source.position},
+          {"src", source.source},
+          {"time", source.time},
+      };
+      if (!source.tag_ota.empty()) {
+        entry["otaAlias"] = source.tag_ota;
+        BOOST_LOG_TRIVIAL(debug) << loghdr << this->plugin_name << " otaAlias: '" << source.tag_ota << "' for src " << source.source;
       }
-    } else {
-      source_list << "]";
+      source_list.push_back(entry);
     }
+    std::string source_list_string = source_list.dump();
 
     freq_string = freq.str();
     error_count_string = error_count.str();
     spike_count_string = spike_count.str();
-    source_list_string = source_list.str();
     call_length_string = call_length.str();
 
     CURL *curl = curl_easy_init();
